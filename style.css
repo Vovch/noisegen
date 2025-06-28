@@ -16,6 +16,10 @@ body {
     min-height: 100vh;
     margin: 0;
     text-align: center;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .container {
@@ -55,6 +59,11 @@ header p {
     background-color: transparent;
     color: var(--primary-color);
     transition: all 0.2s ease-in-out;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: manipulation;
 }
 
 .noise-btn:hover, #play-pause-btn:hover:not(:disabled) {
