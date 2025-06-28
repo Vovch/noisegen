@@ -19,9 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let audioContext;
     let noiseNode;
+    let gainNode; // Use a single gain node
     let selectedNoise = null;
     let isPlaying = false;
-    let audioInitialized = false;
+    let userHasInteracted = false; // Track first user interaction for iOS
     const bufferSize = 4096;
 
     // Web Audio API state variables for different noise colors
@@ -33,47 +34,46 @@ document.addEventListener('DOMContentLoaded', () => {
     function isIOS() {
         return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
     }
-    function isSafari() {
+   function isSafari() {
         return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
     }
 
-    const initializeAudio = async () => {
+    // This function MUST be called from a direct, synchronous user event (e.g., 'click', 'touchend')
+    const unlockAudio = () => {
+        if (userHasInteracted || !audioContext) return; // Already unlocked or not ready
+        if (audioContext.state === 'suspended') {
+            audioContext.resume().then(() => {
+                console.log('AudioContext resumed successfully.');
+                userHasInteracted = true;
+            }).catch(e => console.error('AudioContext resume failed:', e));
+        } else {
+            userHasInteracted = true;
+        }
+    };
+
+    const initializeAudio = () => {
+        if (audioContext) return;
         try {
-            if (!audioContext) {
-                const Audiocontext = window.AudioContext || window.webkitAudioContext;
-                audioContext = new Audiocontext();
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContext) {
+                console.error('Web Audio API is not supported in this browser.');
+                statusText.textContent = 'Error: Audio not supported.';
+                return;
             }
-            // Only require user gesture for iOS/Safari
-            if ((isIOS() || isSafari()) && audioContext.state === 'suspended') {
-                await audioContext.resume();
-            } else if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-            audioInitialized = true;
-            console.log('Audio initialized successfully, state:', audioContext.state);
+            audioContext = new AudioContext();
+            gainNode = audioContext.createGain(); // Create the gain node once
+            gainNode.gain.value = 0.5;
+            gainNode.connect(audioContext.destination);
+            console.log('AudioContext created, state:', audioContext.state);
         } catch (error) {
             console.error('Failed to initialize audio:', error);
-            throw error;
+            statusText.textContent = 'Error: Could not create audio.';
         }
     };
     
     const createNoiseNode = () => {
-        try {
-            // Check if AudioWorklet is available (modern approach)
-            if (audioContext.audioWorklet && window.AudioWorkletNode) {
-                // For now, fall back to ScriptProcessor but with better Safari compatibility
-                return createScriptProcessorNode();
-            } else {
-                return createScriptProcessorNode();
-            }
-        } catch (error) {
-            console.error('Error creating noise node:', error);
-            throw error;
-        }
-    };
-
-    const createScriptProcessorNode = () => {
-        // Use ScriptProcessorNode with better Safari compatibility
+        // ScriptProcessorNode is deprecated but necessary for this implementation.
+        // For production apps, AudioWorklet is the modern standard.
         const node = audioContext.createScriptProcessor(bufferSize, 1, 1);
         
         node.onaudioprocess = (e) => {
@@ -118,29 +118,21 @@ document.addEventListener('DOMContentLoaded', () => {
         return node;
     };
 
-    const playNoise = async () => {
-        if (!selectedNoise) return;
-        try {
-            await initializeAudio();
-            if (noiseNode) {
-                noiseNode.disconnect();
-                noiseNode = null;
-            }
-            noiseNode = createNoiseNode();
-            const gainNode = audioContext.createGain();
-            gainNode.gain.value = 0.5;
-            noiseNode.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-            isPlaying = true;
-            playPauseButton.textContent = 'Pause';
-            statusText.textContent = `Playing ${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise`;
-            console.log('Audio started successfully');
-        } catch (error) {
-            console.error('Error starting audio:', error);
-            statusText.textContent = 'Error: Audio not supported or blocked. Please check permissions.';
-            isPlaying = false;
-            playPauseButton.textContent = 'Play';
+    const playNoise = () => {
+        if (!selectedNoise || !audioContext) return;
+
+        // Disconnect any existing node
+        if (noiseNode) {
+            noiseNode.disconnect();
         }
+
+        noiseNode = createNoiseNode();
+        noiseNode.connect(gainNode); // Connect to the persistent gain node
+
+        isPlaying = true;
+        playPauseButton.textContent = 'Pause';
+        statusText.textContent = `Playing ${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise`;
+        console.log('Audio started successfully');
     };
 
 
@@ -149,49 +141,57 @@ document.addEventListener('DOMContentLoaded', () => {
             noiseNode.disconnect();
             // We don't destroy the node, just disconnect
         }
-        if (audioContext && audioContext.state === 'running') {
-            audioContext.suspend(); // More efficient than closing/re-opening
-        }
         isPlaying = false;
         playPauseButton.textContent = 'Play';
-        statusText.textContent = `${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise selected`;
+        if (selectedNoise) {
+            statusText.textContent = `${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise selected`;
+        }
     };
 
     noiseButtons.forEach(button => {
-        button.addEventListener('click', async (e) => {
+        button.addEventListener('click', (e) => {
             e.preventDefault();
+
+            // Initialize audio on the very first user interaction
+            if (!audioContext) {
+                initializeAudio();
+            }
+            unlockAudio(); // Attempt to unlock on every interaction until successful
+
             // Deactivate other buttons
             noiseButtons.forEach(btn => btn.classList.remove('active'));
             button.classList.add('active');
-            selectedNoise = button.dataset.noise;
-            playPauseButton.disabled = false;
-            if (!audioInitialized) {
-                try {
-                    await initializeAudio();
-                    console.log('Audio initialized on button click');
-                } catch (error) {
-                    console.error('Error initializing audio on button click:', error);
-                    statusText.textContent = 'Error: Could not initialize audio. Please try again.';
-                    return;
+            
+            const newNoise = button.dataset.noise;
+            if (selectedNoise !== newNoise) {
+                selectedNoise = newNoise;
+                // If already playing, switch the noise type immediately
+                if (isPlaying) {
+                    playNoise();
+                } else {
+                    // Update status text if not playing
+                    statusText.textContent = `${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise selected`;
                 }
             }
-            if (isPlaying) {
-                await playNoise();
-            } else {
-                stopNoise();
-            }
+            
+            playPauseButton.disabled = false;
         });
     });
 
-    playPauseButton.addEventListener('click', async (e) => {
+    playPauseButton.addEventListener('click', (e) => {
         e.preventDefault();
-        
         if (!selectedNoise) return;
+
+        // Initialize audio on the very first user interaction
+        if (!audioContext) {
+            initializeAudio();
+        }
+        unlockAudio(); // Attempt to unlock on every interaction until successful
 
         if (isPlaying) {
             stopNoise();
         } else {
-            await playNoise();
+            playNoise();
         }
     });
 });
