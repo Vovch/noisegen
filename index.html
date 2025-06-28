@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Noise Generator</title>
+    <meta name="description" content="A simple offline-first noise generator PWA for focus, sleep, or tinnitus relief.">
+    <meta name="theme-color" content="#1e1e1e"/>
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
+    <link rel="icon" type="image/png" sizes="96x96" href="icons/favicon-96x96.png">
+    <link rel="shortcut icon" href="icons/favicon.ico">
+</head>
+<body>
+    <main class="container">
+        <header>
+            <h1>Noise Generator</h1>
+            <p id="status-text">Select a noise color to begin</p>
+        </header>
+
+        <nav class="noise-controls">
+            <button class="noise-btn" data-noise="white">White</button>
+            <button class="noise-btn" data-noise="pink">Pink</button>
+            <button class="noise-btn" data-noise="brown">Brown</button>
+            <button class="noise-btn" data-noise="purple">Purple</button>
+        </nav>
+
+        <div class="master-controls">
+            <button id="play-pause-btn" disabled>Play</button>
+        </div>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
