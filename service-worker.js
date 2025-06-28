@@ -1,16 +1,16 @@
 const CACHE_NAME = 'noise-generator-v1';
 const urlsToCache = [
-    '/',
-    '/index.html',
-    '/style.css',
-    '/script.js',
-    '/manifest.json',
-    '/icons/web-app-manifest-192x192.png',
-    '/icons/web-app-manifest-512x512.png',
-    '/icons/apple-touch-icon.png',
-    '/icons/favicon-96x96.png',
-    '/icons/favicon.ico',
-    '/icons/favicon.svg'
+    './',
+    './index.html',
+    './style.css',
+    './script.js',
+    './manifest.json',
+    './icons/web-app-manifest-192x192.png',
+    './icons/web-app-manifest-512x512.png',
+    './icons/apple-touch-icon.png',
+    './icons/favicon-96x96.png',
+    './icons/favicon.ico',
+    './icons/favicon.svg'
 ];
 
 // Install event: cache all the core assets
