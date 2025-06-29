@@ -1,4 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // Initialize audio context as soon as the DOM is ready
+    initializeAudio();
+
     // Debug info for Safari troubleshooting
     console.log('Browser info:', {
         userAgent: navigator.userAgent,
@@ -40,14 +43,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // This function MUST be called from a direct, synchronous user event (e.g., 'click', 'touchend')
     const unlockAudio = () => {
-        if (userHasInteracted || !audioContext) return; // Already unlocked or not ready
+        if (!audioContext) {
+            console.log('unlockAudio: AudioContext not ready.');
+            return;
+        }
+        if (userHasInteracted && audioContext.state === 'running') {
+            // If already interacted and context is running, no need to do anything.
+            // This check is more robust than just relying on userHasInteracted.
+            return;
+        }
+
+        console.log(`unlockAudio: Current AudioContext state: ${audioContext.state}`);
         if (audioContext.state === 'suspended') {
             audioContext.resume().then(() => {
-                console.log('AudioContext resumed successfully.');
-                userHasInteracted = true;
-            }).catch(e => console.error('AudioContext resume failed:', e));
-        } else {
+                console.log('AudioContext resumed successfully from unlockAudio.');
+                console.log(`unlockAudio: New AudioContext state: ${audioContext.state}`);
+                if (audioContext.state === 'running') {
+                    userHasInteracted = true; // Set only on successful resume to running state
+                }
+            }).catch(e => {
+                console.error('AudioContext resume failed in unlockAudio:', e);
+            });
+        } else if (audioContext.state === 'running') {
+            // If it's already running, we can consider the interaction requirement met.
+            console.log('unlockAudio: AudioContext is already running.');
             userHasInteracted = true;
+        } else {
+            // Potentially 'closed' or other states.
+             console.log(`unlockAudio: AudioContext in unexpected state: ${audioContext.state}`);
         }
     };
 
@@ -119,8 +142,39 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const playNoise = () => {
-        if (!selectedNoise || !audioContext) return;
+        if (!selectedNoise || !audioContext) {
+            console.log('playNoise: Cannot play, no selected noise or AudioContext not ready.');
+            return;
+        }
 
+        // Final safeguard: Check and attempt to resume AudioContext if suspended
+        if (audioContext.state === 'suspended') {
+            console.log('playNoise: AudioContext is suspended, attempting to resume...');
+            audioContext.resume().then(() => {
+                console.log('AudioContext resumed successfully from playNoise.');
+                console.log(`playNoise: New AudioContext state: ${audioContext.state}`);
+                if (audioContext.state === 'running') {
+                    userHasInteracted = true; // Update flag if resumed here
+                    // Proceed to play only if resume was successful
+                    actuallyPlayNoise();
+                } else {
+                    console.error('playNoise: Failed to resume AudioContext to running state. Sound may not play.');
+                    statusText.textContent = 'Error: Audio failed to start.';
+                }
+            }).catch(e => {
+                console.error('playNoise: AudioContext resume failed:', e);
+                statusText.textContent = 'Error: Audio resume failed.';
+            });
+        } else if (audioContext.state === 'running') {
+            actuallyPlayNoise();
+        } else {
+            console.error(`playNoise: AudioContext in unexpected state: ${audioContext.state}. Cannot play noise.`);
+            statusText.textContent = `Error: Audio state ${audioContext.state}.`;
+        }
+    };
+
+    // Extracted the core logic of playing noise to be called after checks
+    const actuallyPlayNoise = () => {
         // Disconnect any existing node
         if (noiseNode) {
             noiseNode.disconnect();
@@ -132,7 +186,7 @@ document.addEventListener('DOMContentLoaded', () => {
         isPlaying = true;
         playPauseButton.textContent = 'Pause';
         statusText.textContent = `Playing ${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise`;
-        console.log('Audio started successfully');
+        console.log('actuallyPlayNoise: Audio started successfully');
     };
 
 
@@ -152,10 +206,7 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', (e) => {
             e.preventDefault();
 
-            // Initialize audio on the very first user interaction
-            if (!audioContext) {
-                initializeAudio();
-            }
+            // Audio is now initialized on DOMContentLoaded
             unlockAudio(); // Attempt to unlock on every interaction until successful
 
             // Deactivate other buttons
@@ -167,6 +218,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 selectedNoise = newNoise;
                 // If already playing, switch the noise type immediately
                 if (isPlaying) {
+                    // Stop current noise, then play new one.
+                    // playNoise() will handle the AudioContext state checks.
+                    stopNoise(); // Stop first to ensure clean transition
                     playNoise();
                 } else {
                     // Update status text if not playing
@@ -182,10 +236,7 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         if (!selectedNoise) return;
 
-        // Initialize audio on the very first user interaction
-        if (!audioContext) {
-            initializeAudio();
-        }
+        // Audio is now initialized on DOMContentLoaded
         unlockAudio(); // Attempt to unlock on every interaction until successful
 
         if (isPlaying) {
