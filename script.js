@@ -47,30 +47,32 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log('unlockAudio: AudioContext not ready.');
             return;
         }
-        if (userHasInteracted && audioContext.state === 'running') {
-            // If already interacted and context is running, no need to do anything.
-            // This check is more robust than just relying on userHasInteracted.
+
+        // If context is already running, ensure userHasInteracted is true and return.
+        if (audioContext.state === 'running') {
+            if (!userHasInteracted) {
+                // This can happen if audio started automatically on non-iOS browsers
+                // or if a previous unlockAudio call succeeded.
+                console.log('unlockAudio: AudioContext is already running.');
+                userHasInteracted = true;
+            }
             return;
         }
 
-        console.log(`unlockAudio: Current AudioContext state: ${audioContext.state}`);
         if (audioContext.state === 'suspended') {
+            console.log(`unlockAudio: AudioContext is suspended. Attempting to resume.`);
             audioContext.resume().then(() => {
                 console.log('AudioContext resumed successfully from unlockAudio.');
                 console.log(`unlockAudio: New AudioContext state: ${audioContext.state}`);
                 if (audioContext.state === 'running') {
-                    userHasInteracted = true; // Set only on successful resume to running state
+                    userHasInteracted = true; // Mark that user interaction has successfully started audio.
                 }
             }).catch(e => {
                 console.error('AudioContext resume failed in unlockAudio:', e);
             });
-        } else if (audioContext.state === 'running') {
-            // If it's already running, we can consider the interaction requirement met.
-            console.log('unlockAudio: AudioContext is already running.');
-            userHasInteracted = true;
         } else {
-            // Potentially 'closed' or other states.
-             console.log(`unlockAudio: AudioContext in unexpected state: ${audioContext.state}`);
+            // Handles 'closed' or any other unexpected states.
+            console.log(`unlockAudio: AudioContext in unexpected state: ${audioContext.state}.`);
         }
     };
 
@@ -147,29 +149,17 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Final safeguard: Check and attempt to resume AudioContext if suspended
-        if (audioContext.state === 'suspended') {
-            console.log('playNoise: AudioContext is suspended, attempting to resume...');
-            audioContext.resume().then(() => {
-                console.log('AudioContext resumed successfully from playNoise.');
-                console.log(`playNoise: New AudioContext state: ${audioContext.state}`);
-                if (audioContext.state === 'running') {
-                    userHasInteracted = true; // Update flag if resumed here
-                    // Proceed to play only if resume was successful
-                    actuallyPlayNoise();
-                } else {
-                    console.error('playNoise: Failed to resume AudioContext to running state. Sound may not play.');
-                    statusText.textContent = 'Error: Audio failed to start.';
-                }
-            }).catch(e => {
-                console.error('playNoise: AudioContext resume failed:', e);
-                statusText.textContent = 'Error: Audio resume failed.';
-            });
-        } else if (audioContext.state === 'running') {
+        // Play noise only if AudioContext is in a 'running' state.
+        // unlockAudio (triggered by user gesture) is responsible for resuming from 'suspended'.
+        if (audioContext.state === 'running') {
             actuallyPlayNoise();
+        } else if (audioContext.state === 'suspended') {
+            console.log('playNoise: AudioContext is suspended. User interaction is required to start audio.');
+            // Optionally, provide user feedback that interaction is needed.
+            // statusText.textContent = 'Tap or click to enable audio.';
         } else {
             console.error(`playNoise: AudioContext in unexpected state: ${audioContext.state}. Cannot play noise.`);
-            statusText.textContent = `Error: Audio state ${audioContext.state}.`;
+            statusText.textContent = `Error: Audio context state is ${audioContext.state}.`;
         }
     };
 
