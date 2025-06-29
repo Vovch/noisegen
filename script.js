@@ -195,30 +195,43 @@ document.addEventListener('DOMContentLoaded', () => {
     noiseButtons.forEach(button => {
         button.addEventListener('click', (e) => {
             e.preventDefault();
+            console.log('[NoiseButton Listener] Click event started for:', button.dataset.noise);
 
             // Audio is now initialized on DOMContentLoaded
+            console.log('[NoiseButton Listener] Calling unlockAudio...');
             unlockAudio(); // Attempt to unlock on every interaction until successful
+            console.log('[NoiseButton Listener] unlockAudio call complete. AudioContext state:', audioContext ? audioContext.state : 'N/A');
 
             // Deactivate other buttons
+            console.log('[NoiseButton Listener] Deactivating other buttons...');
             noiseButtons.forEach(btn => btn.classList.remove('active'));
             button.classList.add('active');
+            console.log('[NoiseButton Listener] Current button activated.');
             
             const newNoise = button.dataset.noise;
+            console.log('[NoiseButton Listener] newNoise:', newNoise);
+
             if (selectedNoise !== newNoise) {
+                console.log(`[NoiseButton Listener] selectedNoise changed from ${selectedNoise} to ${newNoise}`);
                 selectedNoise = newNoise;
                 // If already playing, switch the noise type immediately
                 if (isPlaying) {
+                    console.log('[NoiseButton Listener] Noise type changed while playing. Stopping old, starting new.');
                     // Stop current noise, then play new one.
                     // playNoise() will handle the AudioContext state checks.
                     stopNoise(); // Stop first to ensure clean transition
                     playNoise();
                 } else {
                     // Update status text if not playing
+                    console.log('[NoiseButton Listener] Noise type selected while not playing.');
                     statusText.textContent = `${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise selected`;
                 }
+            } else {
+                console.log('[NoiseButton Listener] Same noise type selected:', newNoise);
             }
             
             playPauseButton.disabled = false;
+            console.log('[NoiseButton Listener] Play/Pause button ENABLED.');
         });
     });
 
