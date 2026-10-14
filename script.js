@@ -1,7 +1,4 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // Initialize audio context as soon as the DOM is ready
-    initializeAudio();
-
     // Debug info for Safari troubleshooting
     console.log('Browser info:', {
         userAgent: navigator.userAgent,
@@ -95,6 +92,10 @@ document.addEventListener('DOMContentLoaded', () => {
             statusText.textContent = 'Error: Could not create audio.';
         }
     };
+
+    // Initialize audio context as soon as the DOM is ready.
+    // Must come after the const declaration above (no hoisting for arrow functions).
+    initializeAudio();
     
     const createNoiseNode = () => {
         // ScriptProcessorNode is deprecated but necessary for this implementation.
