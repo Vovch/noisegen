@@ -1,11 +1,4 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // Debug info for Safari troubleshooting
-    console.log('Browser info:', {
-        userAgent: navigator.userAgent,
-        audioContext: !!(window.AudioContext || window.webkitAudioContext),
-        serviceWorker: !!navigator.serviceWorker
-    });
-
     // Register the service worker for PWA functionality
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('./service-worker.js')
@@ -17,231 +10,217 @@ document.addEventListener('DOMContentLoaded', () => {
     const playPauseButton = document.getElementById('play-pause-btn');
     const statusText = document.getElementById('status-text');
 
-    let audioContext;
-    let noiseNode;
-    let gainNode; // Use a single gain node
+    // Noise is pre-rendered into a seamlessly looping WAV and played through an
+    // <audio> element rather than streamed through the Web Audio API. On iOS this:
+    //  - plays even when the ringer switch is set to silent (Web Audio is muted),
+    //  - keeps playing when the screen locks or the app is backgrounded,
+    //  - only needs a plain audio.play() inside the tap handler to start.
+    const SAMPLE_RATE = 44100;
+    const LOOP_SECONDS = 20;
+    const CROSSFADE_SECONDS = 0.5;
+    const MASTER_GAIN = 0.5;
+
+    const audio = new Audio();
+    audio.loop = true;
+    audio.preload = 'auto';
+    audio.setAttribute('playsinline', '');
+
+    const noiseUrls = {}; // Cache of generated WAV blob URLs per noise color
     let selectedNoise = null;
     let isPlaying = false;
-    let userHasInteracted = false; // Track first user interaction for iOS
-    const bufferSize = 4096;
 
-    // Web Audio API state variables for different noise colors
-    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0; // For Pink Noise
-    let lastOut = 0; // For Brown Noise
-    let lastIn = 0; // For Purple Noise
+    const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-    // Utility: Detect iOS/Safari
-    function isIOS() {
-        return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-    }
-   function isSafari() {
-        return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-    }
+    // Returns a function producing successive samples of the given noise color.
+    const createNoiseSource = (type) => {
+        let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0; // Pink
+        let lastOut = 0; // Brown
+        let lastIn = 0; // Purple
 
-    // This function MUST be called from a direct, synchronous user event (e.g., 'click', 'touchend')
-    const unlockAudio = () => {
-        if (!audioContext) {
-            console.log('unlockAudio: AudioContext not ready.');
-            return;
-        }
-
-        // If context is already running, ensure userHasInteracted is true and return.
-        if (audioContext.state === 'running') {
-            if (!userHasInteracted) {
-                // This can happen if audio started automatically on non-iOS browsers
-                // or if a previous unlockAudio call succeeded.
-                console.log('unlockAudio: AudioContext is already running.');
-                userHasInteracted = true;
-            }
-            return;
-        }
-
-        if (audioContext.state === 'suspended') {
-            console.log(`unlockAudio: AudioContext is suspended. Attempting to resume.`);
-            audioContext.resume().then(() => {
-                console.log('AudioContext resumed successfully from unlockAudio.');
-                console.log(`unlockAudio: New AudioContext state: ${audioContext.state}`);
-                if (audioContext.state === 'running') {
-                    userHasInteracted = true; // Mark that user interaction has successfully started audio.
-                }
-            }).catch(e => {
-                console.error('AudioContext resume failed in unlockAudio:', e);
-            });
-        } else {
-            // Handles 'closed' or any other unexpected states.
-            console.log(`unlockAudio: AudioContext in unexpected state: ${audioContext.state}.`);
+        switch (type) {
+            case 'white':
+                return () => Math.random() * 2 - 1;
+            case 'pink':
+                return () => {
+                    const white = Math.random() * 2 - 1;
+                    b0 = 0.99886 * b0 + white * 0.0555179;
+                    b1 = 0.99332 * b1 + white * 0.0750759;
+                    b2 = 0.96900 * b2 + white * 0.1538520;
+                    b3 = 0.86650 * b3 + white * 0.3104856;
+                    b4 = 0.55000 * b4 + white * 0.5329522;
+                    b5 = -0.7616 * b5 - white * 0.0168980;
+                    const out = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+                    b6 = white * 0.115926;
+                    return out;
+                };
+            case 'brown':
+                return () => {
+                    const white = Math.random() * 2 - 1;
+                    lastOut = (lastOut + (0.02 * white)) / 1.02;
+                    return lastOut * 3.5;
+                };
+            case 'purple':
+                return () => {
+                    const white = Math.random() * 2 - 1;
+                    const out = white - lastIn;
+                    lastIn = white;
+                    return out * 0.7;
+                };
+            default:
+                return () => 0;
         }
     };
 
-    const initializeAudio = () => {
-        if (audioContext) return;
-        try {
-            const AudioContext = window.AudioContext || window.webkitAudioContext;
-            if (!AudioContext) {
-                console.error('Web Audio API is not supported in this browser.');
-                statusText.textContent = 'Error: Audio not supported.';
-                return;
-            }
-            audioContext = new AudioContext();
-            gainNode = audioContext.createGain(); // Create the gain node once
-            gainNode.gain.value = 0.5;
-            gainNode.connect(audioContext.destination);
-            console.log('AudioContext created, state:', audioContext.state);
-        } catch (error) {
-            console.error('Failed to initialize audio:', error);
-            statusText.textContent = 'Error: Could not create audio.';
+    // Renders LOOP_SECONDS of noise whose end crossfades into its start, so the
+    // <audio> loop point is inaudible.
+    const renderLoop = (type) => {
+        const length = SAMPLE_RATE * LOOP_SECONDS;
+        const fade = Math.floor(SAMPLE_RATE * CROSSFADE_SECONDS);
+        const next = createNoiseSource(type);
+
+        const raw = new Float32Array(length + fade);
+        for (let i = 0; i < raw.length; i++) {
+            raw[i] = next();
         }
+
+        const samples = raw.subarray(0, length);
+        for (let i = 0; i < fade; i++) {
+            const t = i / fade;
+            // Equal-power crossfade: the tail rendered past the loop end fades out
+            // while the head fades in.
+            samples[i] = raw[i] * Math.sqrt(t) + raw[length + i] * Math.sqrt(1 - t);
+        }
+        return samples;
     };
 
-    // Initialize audio context as soon as the DOM is ready.
-    // Must come after the const declaration above (no hoisting for arrow functions).
-    initializeAudio();
-    
-    const createNoiseNode = () => {
-        // ScriptProcessorNode is deprecated but necessary for this implementation.
-        // For production apps, AudioWorklet is the modern standard.
-        const node = audioContext.createScriptProcessor(bufferSize, 1, 1);
-        
-        node.onaudioprocess = (e) => {
-            const output = e.outputBuffer.getChannelData(0);
-            for (let i = 0; i < bufferSize; i++) {
-                let noise;
-                switch (selectedNoise) {
-                    case 'white':
-                        noise = Math.random() * 2 - 1;
-                        break;
-                    case 'pink':
-                        const white = Math.random() * 2 - 1;
-                        b0 = 0.99886 * b0 + white * 0.0555179;
-                        b1 = 0.99332 * b1 + white * 0.0750759;
-                        b2 = 0.96900 * b2 + white * 0.1538520;
-                        b3 = 0.86650 * b3 + white * 0.3104856;
-                        b4 = 0.55000 * b4 + white * 0.5329522;
-                        b5 = -0.7616 * b5 - white * 0.0168980;
-                        noise = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
-                        noise *= 0.11; // Adjust gain
-                        b6 = white * 0.115926;
-                        break;
-                    case 'brown':
-                        const brownWhite = Math.random() * 2 - 1;
-                        lastOut = (lastOut + (0.02 * brownWhite)) / 1.02;
-                        noise = lastOut;
-                        noise *= 3.5; // Adjust gain
-                        break;
-                    case 'purple':
-                        const purpleWhite = Math.random() * 2 - 1;
-                        noise = purpleWhite - lastIn;
-                        lastIn = purpleWhite;
-                        noise *= 0.7; // Adjust gain
-                        break;
-                    default:
-                        noise = 0;
-                }
-                 // Prevent clipping
-                output[i] = Math.max(-1, Math.min(1, noise));
-            }
+    // Encodes mono float samples as a 16-bit PCM WAV blob.
+    const encodeWav = (samples) => {
+        const buffer = new ArrayBuffer(44 + samples.length * 2);
+        const view = new DataView(buffer);
+        const writeString = (offset, str) => {
+            for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
         };
-        return node;
+
+        writeString(0, 'RIFF');
+        view.setUint32(4, 36 + samples.length * 2, true);
+        writeString(8, 'WAVE');
+        writeString(12, 'fmt ');
+        view.setUint32(16, 16, true); // fmt chunk size
+        view.setUint16(20, 1, true); // PCM
+        view.setUint16(22, 1, true); // mono
+        view.setUint32(24, SAMPLE_RATE, true);
+        view.setUint32(28, SAMPLE_RATE * 2, true); // byte rate
+        view.setUint16(32, 2, true); // block align
+        view.setUint16(34, 16, true); // bits per sample
+        writeString(36, 'data');
+        view.setUint32(40, samples.length * 2, true);
+
+        for (let i = 0; i < samples.length; i++) {
+            // iOS ignores audio.volume, so the master gain is baked into the samples.
+            const s = Math.max(-1, Math.min(1, samples[i] * MASTER_GAIN));
+            view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        }
+        return new Blob([buffer], { type: 'audio/wav' });
     };
 
+    const getNoiseUrl = (type) => {
+        if (!noiseUrls[type]) {
+            noiseUrls[type] = URL.createObjectURL(encodeWav(renderLoop(type)));
+        }
+        return noiseUrls[type];
+    };
+
+    const updateUi = () => {
+        playPauseButton.textContent = isPlaying ? 'Pause' : 'Play';
+        if (selectedNoise) {
+            statusText.textContent = isPlaying
+                ? `Playing ${capitalize(selectedNoise)} Noise`
+                : `${capitalize(selectedNoise)} Noise selected`;
+        }
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+        }
+    };
+
+    // Must be called synchronously from a user gesture (click) so iOS allows playback.
     const playNoise = () => {
-        if (!selectedNoise || !audioContext) {
-            console.log('playNoise: Cannot play, no selected noise or AudioContext not ready.');
-            return;
+        if (!selectedNoise) return;
+
+        const url = getNoiseUrl(selectedNoise);
+        if (audio.src !== url) {
+            audio.src = url;
         }
 
-        // Play noise only if AudioContext is in a 'running' state.
-        // unlockAudio (triggered by user gesture) is responsible for resuming from 'suspended'.
-        if (audioContext.state === 'running') {
-            actuallyPlayNoise();
-        } else if (audioContext.state === 'suspended') {
-            console.log('playNoise: AudioContext is suspended. User interaction is required to start audio.');
-            // Optionally, provide user feedback that interaction is needed.
-            // statusText.textContent = 'Tap or click to enable audio.';
-        } else {
-            console.error(`playNoise: AudioContext in unexpected state: ${audioContext.state}. Cannot play noise.`);
-            statusText.textContent = `Error: Audio context state is ${audioContext.state}.`;
+        if ('mediaSession' in navigator && window.MediaMetadata) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: `${capitalize(selectedNoise)} Noise`,
+                artist: 'Noise Generator',
+                artwork: [
+                    { src: 'icons/web-app-manifest-512x512.png', sizes: '512x512', type: 'image/png' }
+                ]
+            });
         }
+
+        audio.play().then(() => {
+            isPlaying = true;
+            updateUi();
+        }).catch(error => {
+            // A newer play() (e.g. quickly switching colors) superseded this one.
+            if (error.name === 'AbortError') return;
+            console.error('Playback failed:', error);
+            isPlaying = false;
+            playPauseButton.textContent = 'Play';
+            statusText.textContent = 'Could not start audio. Tap Play to try again.';
+        });
     };
-
-    // Extracted the core logic of playing noise to be called after checks
-    const actuallyPlayNoise = () => {
-        // Disconnect any existing node
-        if (noiseNode) {
-            noiseNode.disconnect();
-        }
-
-        noiseNode = createNoiseNode();
-        noiseNode.connect(gainNode); // Connect to the persistent gain node
-
-        isPlaying = true;
-        playPauseButton.textContent = 'Pause';
-        statusText.textContent = `Playing ${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise`;
-        console.log('actuallyPlayNoise: Audio started successfully');
-    };
-
 
     const stopNoise = () => {
-        if (noiseNode) {
-            noiseNode.disconnect();
-            // We don't destroy the node, just disconnect
-        }
+        audio.pause();
         isPlaying = false;
-        playPauseButton.textContent = 'Play';
-        if (selectedNoise) {
-            statusText.textContent = `${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise selected`;
-        }
+        updateUi();
     };
+
+    // Keep the UI in sync when playback is paused externally (lock screen controls,
+    // headphones unplugged, phone call, etc.).
+    audio.addEventListener('pause', () => {
+        if (isPlaying && !audio.ended) {
+            isPlaying = false;
+            updateUi();
+        }
+    });
+
+    if ('mediaSession' in navigator) {
+        navigator.mediaSession.setActionHandler('play', playNoise);
+        navigator.mediaSession.setActionHandler('pause', stopNoise);
+    }
 
     noiseButtons.forEach(button => {
         button.addEventListener('click', (e) => {
             e.preventDefault();
-            console.log('[NoiseButton Listener] Click event started for:', button.dataset.noise);
 
-            // Audio is now initialized on DOMContentLoaded
-            console.log('[NoiseButton Listener] Calling unlockAudio...');
-            unlockAudio(); // Attempt to unlock on every interaction until successful
-            console.log('[NoiseButton Listener] unlockAudio call complete. AudioContext state:', audioContext ? audioContext.state : 'N/A');
-
-            // Deactivate other buttons
-            console.log('[NoiseButton Listener] Deactivating other buttons...');
             noiseButtons.forEach(btn => btn.classList.remove('active'));
             button.classList.add('active');
-            console.log('[NoiseButton Listener] Current button activated.');
-            
-            const newNoise = button.dataset.noise;
-            console.log('[NoiseButton Listener] newNoise:', newNoise);
 
+            const newNoise = button.dataset.noise;
             if (selectedNoise !== newNoise) {
-                console.log(`[NoiseButton Listener] selectedNoise changed from ${selectedNoise} to ${newNoise}`);
                 selectedNoise = newNoise;
-                // If already playing, switch the noise type immediately
                 if (isPlaying) {
-                    console.log('[NoiseButton Listener] Noise type changed while playing. Stopping old, starting new.');
-                    // Stop current noise, then play new one.
-                    // playNoise() will handle the AudioContext state checks.
-                    stopNoise(); // Stop first to ensure clean transition
+                    // Switch the noise type immediately
                     playNoise();
                 } else {
-                    // Update status text if not playing
-                    console.log('[NoiseButton Listener] Noise type selected while not playing.');
-                    statusText.textContent = `${selectedNoise.charAt(0).toUpperCase() + selectedNoise.slice(1)} Noise selected`;
+                    // Render ahead of time so pressing Play starts instantly
+                    getNoiseUrl(selectedNoise);
+                    updateUi();
                 }
-            } else {
-                console.log('[NoiseButton Listener] Same noise type selected:', newNoise);
             }
-            
+
             playPauseButton.disabled = false;
-            console.log('[NoiseButton Listener] Play/Pause button ENABLED.');
         });
     });
 
     playPauseButton.addEventListener('click', (e) => {
         e.preventDefault();
         if (!selectedNoise) return;
-
-        // Audio is now initialized on DOMContentLoaded
-        unlockAudio(); // Attempt to unlock on every interaction until successful
 
         if (isPlaying) {
             stopNoise();
