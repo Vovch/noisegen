@@ -1,7 +1,19 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Register the service worker for PWA functionality
     if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('./service-worker.js')
+        // Reload once when an updated service worker takes over, so the page runs
+        // the newly deployed files. Skipped on first install (no previous controller).
+        if (navigator.serviceWorker.controller) {
+            let reloading = false;
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                // Don't cut off playing noise; the update applies on the next launch
+                if (reloading || isPlaying) return;
+                reloading = true;
+                window.location.reload();
+            });
+        }
+
+        navigator.serviceWorker.register('./service-worker.js', { updateViaCache: 'none' })
             .then(registration => console.log('Service Worker registered with scope:', registration.scope))
             .catch(error => console.error('Service Worker registration failed:', error));
     }
