@@ -90,3 +90,25 @@ header p {
     color: #777;
     cursor: not-allowed;
 }
+
+.volume-control {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    color: #a0a0a0;
+}
+
+#volume-slider {
+    flex: 1;
+    min-width: 0;
+    height: 2rem; /* Generous touch target */
+    accent-color: var(--primary-color);
+    touch-action: manipulation;
+}
+
+#volume-value {
+    min-width: 3em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}

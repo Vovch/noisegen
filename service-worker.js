@@ -1,4 +1,4 @@
-const CACHE_NAME = 'noise-generator-v3';
+const CACHE_NAME = 'noise-generator-v4';
 const urlsToCache = [
     './',
     './index.html',
