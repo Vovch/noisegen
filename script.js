@@ -8,6 +8,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const noiseButtons = document.querySelectorAll('.noise-btn');
     const playPauseButton = document.getElementById('play-pause-btn');
+    const volumeSlider = document.getElementById('volume-slider');
+    const volumeValue = document.getElementById('volume-value');
     const statusText = document.getElementById('status-text');
 
     // Noise is pre-rendered into a seamlessly looping WAV and played through an
@@ -18,16 +20,37 @@ document.addEventListener('DOMContentLoaded', () => {
     const SAMPLE_RATE = 44100;
     const LOOP_SECONDS = 20;
     const CROSSFADE_SECONDS = 0.5;
-    const MASTER_GAIN = 0.5;
+    const DEFAULT_VOLUME = 0.7; // Slider position; 0.7² ≈ the previous fixed gain of 0.5
+    const VOLUME_STORAGE_KEY = 'noisegen-volume';
 
     const audio = new Audio();
     audio.loop = true;
     audio.preload = 'auto';
     audio.setAttribute('playsinline', '');
 
+    // iOS ignores writes to audio.volume (it always reads back as 1). There the
+    // gain is baked into the WAV instead and the loop is re-encoded on change.
+    const supportsVolume = (() => {
+        const probe = new Audio();
+        probe.volume = 0.5;
+        return probe.volume === 0.5;
+    })();
+
+    const noiseSamples = {}; // Cache of rendered float samples per noise color
     const noiseUrls = {}; // Cache of generated WAV blob URLs per noise color
     let selectedNoise = null;
     let isPlaying = false;
+    let volume = DEFAULT_VOLUME;
+
+    try {
+        const stored = parseFloat(localStorage.getItem(VOLUME_STORAGE_KEY));
+        if (stored >= 0 && stored <= 1) volume = stored;
+    } catch (e) {
+        // Storage unavailable (e.g. private mode); keep the default
+    }
+
+    // Squared curve so the slider feels roughly linear in perceived loudness
+    const volumeToGain = (v) => v * v;
 
     const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
@@ -93,8 +116,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return samples;
     };
 
-    // Encodes mono float samples as a 16-bit PCM WAV blob.
-    const encodeWav = (samples) => {
+    // Encodes mono float samples as a 16-bit PCM WAV blob, scaled by gain.
+    const encodeWav = (samples, gain) => {
         const buffer = new ArrayBuffer(44 + samples.length * 2);
         const view = new DataView(buffer);
         const writeString = (offset, str) => {
@@ -116,8 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
         view.setUint32(40, samples.length * 2, true);
 
         for (let i = 0; i < samples.length; i++) {
-            // iOS ignores audio.volume, so the master gain is baked into the samples.
-            const s = Math.max(-1, Math.min(1, samples[i] * MASTER_GAIN));
+            const s = Math.max(-1, Math.min(1, samples[i])) * gain;
             view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
         }
         return new Blob([buffer], { type: 'audio/wav' });
@@ -125,10 +147,57 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const getNoiseUrl = (type) => {
         if (!noiseUrls[type]) {
-            noiseUrls[type] = URL.createObjectURL(encodeWav(renderLoop(type)));
+            if (!noiseSamples[type]) {
+                noiseSamples[type] = renderLoop(type);
+            }
+            const gain = supportsVolume ? 1 : volumeToGain(volume);
+            noiseUrls[type] = URL.createObjectURL(encodeWav(noiseSamples[type], gain));
         }
         return noiseUrls[type];
     };
+
+    const updateVolumeUi = () => {
+        volumeValue.textContent = `${Math.round(volume * 100)}%`;
+    };
+
+    const applyVolume = (v, { final }) => {
+        volume = v;
+        updateVolumeUi();
+
+        if (supportsVolume) {
+            audio.volume = volumeToGain(volume);
+        } else if (final) {
+            // Re-encode at the new gain and resume from the same position
+            Object.keys(noiseUrls).forEach(type => {
+                URL.revokeObjectURL(noiseUrls[type]);
+                delete noiseUrls[type];
+            });
+            if (selectedNoise) {
+                const position = audio.currentTime;
+                const wasPlaying = isPlaying;
+                audio.src = getNoiseUrl(selectedNoise);
+                audio.addEventListener('loadedmetadata', () => {
+                    audio.currentTime = position;
+                }, { once: true });
+                if (wasPlaying) playNoise();
+            }
+        }
+
+        if (final) {
+            try {
+                localStorage.setItem(VOLUME_STORAGE_KEY, String(volume));
+            } catch (e) {
+                // Storage unavailable; the setting just won't persist
+            }
+        }
+    };
+
+    volumeSlider.value = Math.round(volume * 100);
+    updateVolumeUi();
+    if (supportsVolume) audio.volume = volumeToGain(volume);
+
+    volumeSlider.addEventListener('input', () => applyVolume(volumeSlider.value / 100, { final: false }));
+    volumeSlider.addEventListener('change', () => applyVolume(volumeSlider.value / 100, { final: true }));
 
     const updateUi = () => {
         playPauseButton.textContent = isPlaying ? 'Pause' : 'Play';
