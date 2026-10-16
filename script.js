@@ -24,21 +24,32 @@ document.addEventListener('DOMContentLoaded', () => {
     const volumeValue = document.getElementById('volume-value');
     const statusText = document.getElementById('status-text');
 
-    // Noise is pre-rendered into a seamlessly looping WAV and played through an
-    // <audio> element rather than streamed through the Web Audio API. On iOS this:
+    // Noise is pre-rendered into a looping WAV and played through <audio> elements
+    // rather than streamed through the Web Audio API. On iOS this:
     //  - plays even when the ringer switch is set to silent (Web Audio is muted),
     //  - keeps playing when the screen locks or the app is backgrounded,
     //  - only needs a plain audio.play() inside the tap handler to start.
     const SAMPLE_RATE = 44100;
     const LOOP_SECONDS = 20;
-    const CROSSFADE_SECONDS = 0.5;
+    // Fraction of the loop, on each side of the loop point, where a voice is silent
+    const SILENT_ZONE = 0.05;
     const DEFAULT_VOLUME = 0.7; // Slider position; 0.7² ≈ the previous fixed gain of 0.5
     const VOLUME_STORAGE_KEY = 'noisegen-volume';
 
-    const audio = new Audio();
-    audio.loop = true;
-    audio.preload = 'auto';
-    audio.setAttribute('playsinline', '');
+    // Browsers leave a short silent gap (~100 ms) every time an <audio> element
+    // loops. To hide it, two elements ("voices") play the same clip half a loop
+    // apart. The clip is enveloped so each voice fades to silence around its own
+    // loop point while the other is at full level; the envelopes are complementary,
+    // so the combined loudness stays constant and the gaps fall where it's silent.
+    const createVoice = () => {
+        const voice = new Audio();
+        voice.loop = true;
+        voice.preload = 'auto';
+        voice.setAttribute('playsinline', '');
+        return voice;
+    };
+    const voices = [createVoice(), createVoice()];
+    const [voiceA, voiceB] = voices;
 
     // iOS ignores writes to audio.volume (it always reads back as 1). There the
     // gain is baked into the WAV instead and the loop is re-encoded on change.
@@ -52,6 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const noiseUrls = {}; // Cache of generated WAV blob URLs per noise color
     let selectedNoise = null;
     let isPlaying = false;
+    let isSwitching = false; // Set while sources change, to ignore the resulting pause events
     let volume = DEFAULT_VOLUME;
 
     try {
@@ -106,24 +118,29 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    // Renders LOOP_SECONDS of noise whose end crossfades into its start, so the
-    // <audio> loop point is inaudible.
+    // Power envelope over the loop phase u in [0, 1): silent around the loop point
+    // (u near 0 or 1), full around u = 0.5, with equal-power ramps in between.
+    // envelope(u) + envelope(u + 0.5) === 1, so two voices half a loop apart sum
+    // to constant power.
+    const envelope = (u) => {
+        const rampLength = 0.5 - 2 * SILENT_ZONE;
+        const d = Math.abs(u - 0.5); // 0 at the center, 0.5 at the loop point
+        if (d <= SILENT_ZONE) return 1;
+        if (d >= 0.5 - SILENT_ZONE) return 0;
+        return Math.cos((Math.PI / 2) * (d - SILENT_ZONE) / rampLength) ** 2;
+    };
+
+    // Renders LOOP_SECONDS of noise shaped by the voice envelope.
     const renderLoop = (type) => {
         const length = SAMPLE_RATE * LOOP_SECONDS;
-        const fade = Math.floor(SAMPLE_RATE * CROSSFADE_SECONDS);
         const next = createNoiseSource(type);
 
-        const raw = new Float32Array(length + fade);
-        for (let i = 0; i < raw.length; i++) {
-            raw[i] = next();
-        }
+        // Run the filters for a moment first so brown/pink noise starts settled
+        for (let i = 0; i < SAMPLE_RATE; i++) next();
 
-        const samples = raw.subarray(0, length);
-        for (let i = 0; i < fade; i++) {
-            const t = i / fade;
-            // Equal-power crossfade: the tail rendered past the loop end fades out
-            // while the head fades in.
-            samples[i] = raw[i] * Math.sqrt(t) + raw[length + i] * Math.sqrt(1 - t);
+        const samples = new Float32Array(length);
+        for (let i = 0; i < length; i++) {
+            samples[i] = next() * Math.sqrt(envelope(i / length));
         }
         return samples;
     };
@@ -177,7 +194,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateVolumeUi();
 
         if (supportsVolume) {
-            audio.volume = volumeToGain(volume);
+            voices.forEach(voice => { voice.volume = volumeToGain(volume); });
         } else if (final) {
             // Re-encode at the new gain and resume from the same position
             Object.keys(noiseUrls).forEach(type => {
@@ -185,13 +202,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 delete noiseUrls[type];
             });
             if (selectedNoise) {
-                const position = audio.currentTime;
-                const wasPlaying = isPlaying;
-                audio.src = getNoiseUrl(selectedNoise);
-                audio.addEventListener('loadedmetadata', () => {
-                    audio.currentTime = position;
-                }, { once: true });
-                if (wasPlaying) playNoise();
+                const position = voiceA.currentTime;
+                if (isPlaying) {
+                    playNoise(position);
+                } else {
+                    loadVoices(getNoiseUrl(selectedNoise), position);
+                }
             }
         }
 
@@ -206,7 +222,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     volumeSlider.value = Math.round(volume * 100);
     updateVolumeUi();
-    if (supportsVolume) audio.volume = volumeToGain(volume);
+    if (supportsVolume) voices.forEach(voice => { voice.volume = volumeToGain(volume); });
 
     volumeSlider.addEventListener('input', () => applyVolume(volumeSlider.value / 100, { final: false }));
     volumeSlider.addEventListener('change', () => applyVolume(volumeSlider.value / 100, { final: true }));
@@ -223,14 +239,33 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // Seeks a voice once its metadata is available (seeking before that is ignored).
+    const seekVoice = (voice, time) => {
+        if (voice.readyState >= 1) {
+            voice.currentTime = time;
+        } else {
+            voice.addEventListener('loadedmetadata', () => { voice.currentTime = time; }, { once: true });
+        }
+    };
+
+    // Points both voices at the clip, voice B half a loop ahead of voice A.
+    const loadVoices = (url, position) => {
+        if (voiceA.src === url && position === undefined) return;
+        const start = position || 0;
+        voices.forEach(voice => {
+            if (voice.src !== url) voice.src = url;
+        });
+        seekVoice(voiceA, start);
+        seekVoice(voiceB, (start + LOOP_SECONDS / 2) % LOOP_SECONDS);
+    };
+
     // Must be called synchronously from a user gesture (click) so iOS allows playback.
-    const playNoise = () => {
+    // position optionally restarts both voices from a given point in the loop.
+    const playNoise = (position) => {
         if (!selectedNoise) return;
 
-        const url = getNoiseUrl(selectedNoise);
-        if (audio.src !== url) {
-            audio.src = url;
-        }
+        isSwitching = true;
+        loadVoices(getNoiseUrl(selectedNoise), typeof position === 'number' ? position : undefined);
 
         if ('mediaSession' in navigator && window.MediaMetadata) {
             navigator.mediaSession.metadata = new MediaMetadata({
@@ -242,13 +277,16 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
-        audio.play().then(() => {
+        Promise.all(voices.map(voice => voice.play())).then(() => {
+            isSwitching = false;
             isPlaying = true;
             updateUi();
         }).catch(error => {
             // A newer play() (e.g. quickly switching colors) superseded this one.
             if (error.name === 'AbortError') return;
             console.error('Playback failed:', error);
+            isSwitching = false;
+            voices.forEach(voice => voice.pause());
             isPlaying = false;
             playPauseButton.textContent = 'Play';
             statusText.textContent = 'Could not start audio. Tap Play to try again.';
@@ -256,17 +294,30 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const stopNoise = () => {
-        audio.pause();
         isPlaying = false;
+        voices.forEach(voice => voice.pause());
         updateUi();
     };
 
-    // Keep the UI in sync when playback is paused externally (lock screen controls,
-    // headphones unplugged, phone call, etc.).
-    audio.addEventListener('pause', () => {
-        if (isPlaying && !audio.ended) {
-            isPlaying = false;
-            updateUi();
+    // If either voice is paused externally (lock screen controls, headphones
+    // unplugged, phone call, etc.), pause both and keep the UI in sync.
+    voices.forEach(voice => {
+        voice.addEventListener('pause', () => {
+            if (isPlaying && !isSwitching) stopNoise();
+        });
+    });
+
+    // Keep voice B half a loop away from voice A. Both lose the same gap on every
+    // loop so they rarely drift, but if they do, correct B while it's silent.
+    voiceA.addEventListener('timeupdate', () => {
+        if (!isPlaying || isSwitching || voiceB.seeking) return;
+        const expected = (voiceA.currentTime + LOOP_SECONDS / 2) % LOOP_SECONDS;
+        let drift = voiceB.currentTime - expected;
+        drift -= LOOP_SECONDS * Math.round(drift / LOOP_SECONDS);
+        const phaseB = voiceB.currentTime / LOOP_SECONDS;
+        const bIsSilent = phaseB < SILENT_ZONE * 0.8 || phaseB > 1 - SILENT_ZONE * 0.8;
+        if (Math.abs(drift) > 0.25 && bIsSilent) {
+            voiceB.currentTime = expected;
         }
     });
 
